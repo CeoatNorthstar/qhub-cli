@@ -17,12 +17,6 @@ const SOFT_RED: Color = Color::Rgb(200, 100, 100);
 const CYAN: Color = Color::Rgb(0, 205, 205);  // Smooth cyan
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // Show goodbye screen
-    if app.show_exit_animation {
-        render_goodbye(frame);
-        return;
-    }
-    
     // Calculate suggestion height dynamically
     let suggestion_height = if app.show_suggestions {
         (app.suggestions.len().min(5) + 2) as u16  // Max 5 suggestions + border
@@ -59,21 +53,6 @@ fn render_header(frame: &mut Frame, area: Rect) {
     ]));
     
     frame.render_widget(header, area);
-}
-
-fn render_goodbye(frame: &mut Frame) {
-    let area = frame.area();
-    let text = vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled("goodbye", Style::default().fg(CYAN))),
-        Line::from(""),
-    ];
-    
-    let paragraph = Paragraph::new(text)
-        .alignment(ratatui::layout::Alignment::Center);
-    
-    frame.render_widget(paragraph, area);
 }
 
 fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {

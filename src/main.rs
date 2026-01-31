@@ -80,22 +80,8 @@ async fn run_tui() -> Result<()> {
         // Draw UI
         terminal.draw(|f| ui::render(f, &mut app))?;
 
-        // Handle goodbye screen
-        if app.show_exit_animation {
-            app.exit_animation_frame += 1;
-            // Show for ~1.5 seconds (30 frames at 50ms)
-            if app.exit_animation_frame > 30 {
-                break;
-            }
-            std::thread::sleep(tick_rate);
-            continue;
-        }
-
-        if input::handle_events(&mut app, tick_rate)? {
-            break;
-        }
-
-        if app.should_quit {
+        // Check for exit
+        if app.should_quit || input::handle_events(&mut app, tick_rate)? {
             break;
         }
     }

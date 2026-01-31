@@ -143,8 +143,6 @@ pub struct App {
     pub ai_response_rx: Option<mpsc::Receiver<Result<String, String>>>,
     pub auth_response_rx: Option<mpsc::Receiver<Result<(String, String, String), String>>>,
     pub conversation_history: Vec<ChatMessage>,
-    pub show_exit_animation: bool,
-    pub exit_animation_frame: usize,
     pub config: Config,
     pub auth_service: Option<Arc<AuthService>>,
     // Autocomplete
@@ -248,8 +246,6 @@ impl App {
             ai_response_rx: None,
             auth_response_rx: None,
             conversation_history: vec![DeepSeekClient::get_system_prompt()],
-            show_exit_animation: false,
-            exit_animation_frame: 0,
             config,
             auth_service,
             suggestions: Vec::new(),
@@ -659,8 +655,8 @@ Start generating quantum circuits:
                 ));
             }
             SlashCommand::Quit => {
-                self.show_exit_animation = true;
-                self.exit_animation_frame = 0;
+                // Clean exit without animation to prevent escape codes
+                self.should_quit = true;
             }
             SlashCommand::Clear => {
                 self.messages.clear();
