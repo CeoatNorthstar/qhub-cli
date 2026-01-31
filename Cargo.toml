@@ -35,10 +35,28 @@ thiserror = "1.0"
 dirs = "5.0"
 
 # UUID for session management
-uuid = { version = "1.6", features = ["v4"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Colored output
 colored = "2.1"
 
 # Date/time
 chrono = "0.4"
+
+# Database - PostgreSQL for local, SQLite for Cloudflare D1 compatibility
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "json"] }
+
+# Environment variables
+dotenv = "0.15"
+
+# Password hashing
+argon2 = "0.5"
+
+# JWT tokens
+jsonwebtoken = "9.2"
+
+# Base64 encoding
+base64 = "0.21"
+
+# URL opening for OAuth
+webbrowser = "0.8"

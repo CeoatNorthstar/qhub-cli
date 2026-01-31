@@ -4,6 +4,7 @@ mod config;
 mod api;
 mod quantum;
 mod auth;
+mod db;
 
 use anyhow::Result;
 use clap::Parser;
