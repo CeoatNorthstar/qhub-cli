@@ -1,0 +1,12 @@
+# Environment Variables for Local Development
+# Copy this file to .dev.vars and update with your values
+
+# JWT Configuration
+JWT_SECRET="change-this-to-a-secure-random-string-at-least-32-characters-long"
+JWT_EXPIRY_HOURS="24"
+
+# Environment
+ENVIRONMENT="development"
+
+# Note: .dev.vars is for local development only
+# For staging/production, use: wrangler secret put <KEY> --env <ENV>

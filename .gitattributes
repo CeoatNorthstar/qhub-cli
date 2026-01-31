@@ -1,0 +1,57 @@
+# Git Attributes for QHub
+# Ensures production configs are protected when merging staging → main
+
+# ============================================================================
+# ENVIRONMENT FILES - Always keep destination branch version
+# ============================================================================
+# When merging staging → main, main's version (production) is kept
+# This prevents staging database IDs from leaking into production
+
+.env merge=ours
+.env.production merge=ours
+.env.staging merge=ours
+workers/.dev.vars merge=ours
+
+# ============================================================================
+# CONFIGURATION FILES - Union merge (keep both, validate later)
+# ============================================================================
+# Wrangler.toml has both env.staging and env.production sections
+# Union merge keeps both sections intact
+workers/wrangler.toml merge=union
+
+# ============================================================================
+# DOCUMENTATION - Union merge (combine changes)
+# ============================================================================
+*.md merge=union
+CHANGELOG.md merge=union
+
+# ============================================================================
+# BUILD ARTIFACTS - Never merge
+# ============================================================================
+target/** merge=binary
+*.db merge=binary
+*.db-shm merge=binary
+*.db-wal merge=binary
+
+# ============================================================================
+# DEPLOYMENT SCRIPTS - Manual review required
+# ============================================================================
+# These need careful review during merges
+deploy.sh merge=manual
+test_integration.sh merge=manual
+
+# ============================================================================
+# LOCK FILES - Always use main's version
+# ============================================================================
+Cargo.lock merge=ours
+workers/package-lock.json merge=ours
+
+# Line ending normalization
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.js text eol=lf

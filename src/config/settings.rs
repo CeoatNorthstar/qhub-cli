@@ -9,6 +9,8 @@ const CONFIG_VERSION: u32 = 1;
 pub struct Config {
     #[serde(default = "default_version")]
     pub version: u32,
+    #[serde(default = "default_api_url")]
+    pub api_url: String,
     pub user: Option<UserConfig>,
     #[serde(default)]
     pub ai: AiConfig,
@@ -22,10 +24,36 @@ fn default_version() -> u32 {
     CONFIG_VERSION
 }
 
+fn default_api_url() -> String {
+    // Priority 1: Environment variable (highest priority)
+    if let Ok(url) = std::env::var("QHUB_API_URL") {
+        return url;
+    }
+    
+    // Priority 2: Compile-time feature flag for production builds
+    #[cfg(feature = "production")]
+    {
+        return "https://qhub-api-production.a-contactnaol.workers.dev".to_string();
+    }
+    
+    // Priority 3: Check if we're in a release build (default to staging)
+    #[cfg(not(debug_assertions))]
+    {
+        return "https://qhub-api-staging.a-contactnaol.workers.dev".to_string();
+    }
+    
+    // Priority 4: Debug builds default to local development
+    #[cfg(debug_assertions)]
+    {
+        return "http://localhost:8787".to_string();
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            api_url: default_api_url(),
             user: None,
             ai: AiConfig::default(),
             quantum: QuantumConfig::default(),

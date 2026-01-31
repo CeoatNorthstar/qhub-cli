@@ -1,0 +1,55 @@
+name = "qhub-api"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+workers_dev = true  # Enable *.workers.dev subdomain
+
+# D1 Database Bindings
+[[d1_databases]]
+binding = "DB"
+database_name = "qhub-dev"
+database_id = "local"  # Local development database
+
+# AI Binding
+[ai]
+binding = "AI"
+
+# Environment: Staging
+[env.staging]
+name = "qhub-api-staging"
+
+[env.staging.ai]
+binding = "AI"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "qhub-staging"
+database_id = "18a877b3-4dd2-4f07-bf92-2b341bf8a2ba"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+JWT_EXPIRY_HOURS = "24"
+
+# Environment: Production
+[env.production]
+name = "qhub-api-production"
+
+[env.production.ai]
+binding = "AI"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "qhub-production"
+database_id = "b607a2f3-0ab5-407e-b63a-eb21d01084d0"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+JWT_EXPIRY_HOURS = "24"
+
+# Routes for custom domain (configure after deployment)
+# [[env.production.routes]]
+# pattern = "api.qhub.dev/*"
+# zone_name = "qhub.dev"
+
+# Secrets (set via: wrangler secret put <NAME> --env <ENV>)
+# - JWT_SECRET
+# - IBM_QUANTUM_TOKEN (if using IBM Quantum)

@@ -1,14 +1,11 @@
 use chrono::{DateTime, Local};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use sqlx::PgPool;
-use std::sync::Arc;
 use anyhow::Result;
 
 use crate::api::deepseek::{ChatMessage, DeepSeekClient};
+use crate::api::ApiClient;
 use crate::config::Config;
-use crate::auth::service::AuthService;
-use crate::db::{CreateUserRequest, LoginRequest};
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -144,7 +141,7 @@ pub struct App {
     pub auth_response_rx: Option<mpsc::Receiver<Result<(String, String, String), String>>>,
     pub conversation_history: Vec<ChatMessage>,
     pub config: Config,
-    pub auth_service: Option<Arc<AuthService>>,
+    pub api_client: ApiClient,
     // Autocomplete
     pub suggestions: Vec<String>,
     pub selected_suggestion: usize,
@@ -159,79 +156,53 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        // Load or create configuration
+        // 1. Load or create configuration
         let config = Config::load().unwrap_or_else(|e| {
             eprintln!("Warning: Failed to load config: {}. Using defaults.", e);
             Config::default()
         });
         
-        // Initialize auth service if DATABASE_URL is available
-        let auth_service = match std::env::var("DATABASE_URL") {
-            Ok(url) => {
+        // 2. Initialize API client
+        let mut api_client = ApiClient::new(config.api_url.clone())
+            .expect("Failed to create API client");
+        
+        // 3. Validate stored token if exists
+        let (user_email, user_tier, _is_authenticated) = if let Some(ref user_config) = config.user {
+            if let Some(ref token) = user_config.token {
+                api_client.set_token(token.clone());
+                
+                // Verify token is still valid
                 match tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        PgPool::connect(&url).await
+                        api_client.verify_token().await
                     })
                 }) {
-                    Ok(pool) => {
-                        match AuthService::new(pool) {
-                            Ok(service) => {
-                                eprintln!("✅ Database connected successfully");
-                                Some(Arc::new(service))
-                            }
-                            Err(e) => {
-                                eprintln!("❌ Failed to initialize auth service: {}", e);
-                                None
-                            }
-                        }
+                    Ok(user) => {
+                        eprintln!("✅ Session valid - Welcome back, {}!", user.email);
+                        (Some(user.email), user.tier, true)
                     }
                     Err(e) => {
-                        eprintln!("❌ Database connection failed: {}", e);
-                        eprintln!("💡 Tip: Make sure PostgreSQL is running:");
-                        eprintln!("   docker ps | grep pg-local");
-                        eprintln!("   Or start it: docker-compose up -d");
-                        None
+                        eprintln!("⚠️  Session expired or invalid: {}", e);
+                        eprintln!("💡 Please login again with /login");
+                        api_client.clear_token();
+                        (None, "free".to_string(), false)
                     }
                 }
+            } else {
+                (None, "free".to_string(), false)
             }
-            Err(_) => {
-                eprintln!("⚠️  DATABASE_URL not found in environment");
-                eprintln!("💡 Create a .env file with:");
-                eprintln!("   DATABASE_URL=postgres://postgres:devpass@localhost:5432/app");
-                None
-            }
+        } else {
+            (None, "free".to_string(), false)
         };
         
-        // Initialize AI client with config
+        // 4. Initialize AI client with config
         let ai_client = if let Some(api_key) = config.get_ai_api_key() {
             DeepSeekClient::new(api_key)
         } else {
             DeepSeekClient::with_default_key()
         };
         
-        // Extract user info from config and validate session token
-        let (user_email, user_tier) = if let Some(ref user) = config.user {
-            // If we have a stored token, validate it against the database
-            if let (Some(token), Some(ref auth_svc)) = (&user.token, &auth_service) {
-                match Self::validate_stored_token(token, auth_svc.clone()) {
-                    Ok(validated_user) => {
-                        // Token is valid, use the validated user info
-                        (Some(validated_user.email), validated_user.tier)
-                    }
-                    Err(_) => {
-                        // Token expired or invalid, clear session
-                        eprintln!("⚠️  Stored session expired. Please log in again.");
-                        (None, "free".to_string())
-                    }
-                }
-            } else {
-                // Have user config but no token or no auth service
-                (Some(user.email.clone()), user.tier.clone())
-            }
-        } else {
-            (None, "free".to_string())
-        };
-        
+        // 5. Build App struct
         let mut app = Self {
             messages: Vec::new(),
             input: String::new(),
@@ -247,13 +218,13 @@ impl App {
             auth_response_rx: None,
             conversation_history: vec![DeepSeekClient::get_system_prompt()],
             config,
-            auth_service,
+            api_client,
             suggestions: Vec::new(),
             selected_suggestion: 0,
             show_suggestions: false,
         };
-
-        // Check if first run
+        
+        // 6. Add welcome message based on authentication state
         let is_first_run = !Config::exists();
         
         // Welcome message based on auth state
@@ -481,6 +452,9 @@ Start generating quantum circuits:
         if let Some(ref mut rx) = self.auth_response_rx {
             match rx.try_recv() {
                 Ok(Ok((token, email, tier))) => {
+                    // Save token to API client
+                    self.api_client.set_token(token.clone());
+                    
                     // Save to config
                     self.config.user = Some(crate::config::settings::UserConfig {
                         email: email.clone(),
@@ -539,76 +513,61 @@ Start generating quantum circuits:
     fn handle_slash_command(&mut self, cmd: SlashCommand) {
         match cmd {
             SlashCommand::Login { email, password } => {
-                if self.auth_service.is_none() {
-                    self.messages.push(Message::error(
-                        "Authentication service unavailable. Check DATABASE_URL.".to_string()
-                    ));
-                    self.input.clear();
-                    return;
-                }
-                
                 self.messages.push(Message::system("🔄 Logging in...".to_string()));
                 self.is_loading = true;
                 
-                let auth_service = Arc::clone(self.auth_service.as_ref().unwrap());
+                let api_client = self.api_client.clone();
                 let (tx, rx) = mpsc::channel(1);
                 self.auth_response_rx = Some(rx);
                 
                 tokio::spawn(async move {
-                    let result = auth_service.login(LoginRequest {
-                        email: email.clone(),
+                    let result = api_client.login(crate::api::client::LoginRequest {
+                        email,
                         password,
                     }).await;
                     
                     let response = match result {
-                        Ok(auth_resp) => Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier)),
+                        Ok(auth_resp) => {
+                            Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier))
+                        }
                         Err(e) => Err(e.to_string()),
                     };
                     let _ = tx.send(response).await;
                 });
             }
             SlashCommand::Register { email, username, password } => {
-                if self.auth_service.is_none() {
-                    self.messages.push(Message::error(
-                        "Authentication service unavailable. Check DATABASE_URL.".to_string()
-                    ));
-                    self.input.clear();
-                    return;
-                }
-                
                 self.messages.push(Message::system("🔄 Creating account...".to_string()));
                 self.is_loading = true;
                 
-                let auth_service = Arc::clone(self.auth_service.as_ref().unwrap());
+                let api_client = self.api_client.clone();
                 let (tx, rx) = mpsc::channel(1);
                 self.auth_response_rx = Some(rx);
                 
                 tokio::spawn(async move {
-                    let result = auth_service.register(CreateUserRequest {
-                        email: email.clone(),
+                    let result = api_client.register(crate::api::client::RegisterRequest {
+                        email,
                         username: Some(username),
                         password,
                     }).await;
                     
                     let response = match result {
-                        Ok(auth_resp) => Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier)),
+                        Ok(auth_resp) => {
+                            Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier))
+                        }
                         Err(e) => Err(e.to_string()),
                     };
                     let _ = tx.send(response).await;
                 });
             }
             SlashCommand::Logout => {
-                if let Some(ref mut user_config) = self.config.user {
-                    if let Some(token) = user_config.token.take() {
-                        if let Some(service) = &self.auth_service {
-                            let service = service.clone();
-                            tokio::spawn(async move {
-                                let _ = service.logout(&token).await;
-                            });
-                        }
-                    }
-                }
+                // Call logout API to invalidate session
+                let api_client = self.api_client.clone();
+                tokio::spawn(async move {
+                    let _ = api_client.logout().await;
+                });
                 
+                // Clear local state
+                self.api_client.clear_token();
                 self.config.user = None;
                 self.user_email = None;
                 self.user_tier = "free".to_string();
@@ -679,12 +638,6 @@ Start generating quantum circuits:
                     "✗ Not set"
                 };
                 
-                let db_status = if self.auth_service.is_some() {
-                    "✓ Connected"
-                } else {
-                    "✗ Not available"
-                };
-                
                 let status = if let Some(email) = &self.user_email {
                     format!(
                         r#"
@@ -698,7 +651,7 @@ Start generating quantum circuits:
 │ Configuration                               │
 ├─────────────────────────────────────────────┤
 │ Config file: {}
-│ Database: {}
+│ API URL: {}
 │ AI Provider: {} ({})
 │ Quantum Provider: {} ({})
 │ AI Model: {}
@@ -708,7 +661,7 @@ Start generating quantum circuits:
                         self.user_tier,
                         if self.is_connected { "Connected" } else { "Disconnected" },
                         config_path,
-                        db_status,
+                        self.config.api_url,
                         self.config.ai.provider,
                         ai_key_status,
                         self.config.quantum.provider,
@@ -727,14 +680,14 @@ Start generating quantum circuits:
 │ Configuration                               │
 ├─────────────────────────────────────────────┤
 │ Config file: {}
-│ Database: {}
+│ API URL: {}
 │ AI Provider: {} ({})
 │ Quantum Provider: {} ({})
 │ AI Model: {}
 ╰─────────────────────────────────────────────╯
 "#,
                         config_path,
-                        db_status,
+                        self.config.api_url,
                         self.config.ai.provider,
                         ai_key_status,
                         self.config.quantum.provider,
@@ -767,15 +720,6 @@ Start generating quantum circuits:
     pub fn scroll_to_bottom(&mut self) {
         // Will be calculated properly in UI rendering
         self.scroll_offset = usize::MAX;
-    }
-    
-    /// Validate a stored token by verifying it with the auth service
-    fn validate_stored_token(token: &str, auth_service: Arc<AuthService>) -> Result<crate::db::User> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                auth_service.verify_session(token).await
-            })
-        })
     }
     
     /// Check if user is authenticated
