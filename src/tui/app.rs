@@ -164,21 +164,41 @@ impl App {
         });
         
         // Initialize auth service if DATABASE_URL is available
-        let auth_service = std::env::var("DATABASE_URL")
-            .ok()
-            .and_then(|url| {
-                tokio::task::block_in_place(|| {
+        let auth_service = match std::env::var("DATABASE_URL") {
+            Ok(url) => {
+                match tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        PgPool::connect(&url).await.ok()
+                        PgPool::connect(&url).await
                     })
-                })
-            })
-            .and_then(|pool| AuthService::new(pool).ok())
-            .map(Arc::new);
-        
-        if auth_service.is_none() {
-            eprintln!("⚠️  Warning: Database not available. Auth features disabled.");
-        }
+                }) {
+                    Ok(pool) => {
+                        match AuthService::new(pool) {
+                            Ok(service) => {
+                                eprintln!("✅ Database connected successfully");
+                                Some(Arc::new(service))
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Failed to initialize auth service: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Database connection failed: {}", e);
+                        eprintln!("💡 Tip: Make sure PostgreSQL is running:");
+                        eprintln!("   docker ps | grep pg-local");
+                        eprintln!("   Or start it: docker-compose up -d");
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("⚠️  DATABASE_URL not found in environment");
+                eprintln!("💡 Create a .env file with:");
+                eprintln!("   DATABASE_URL=postgres://postgres:devpass@localhost:5432/app");
+                None
+            }
+        };
         
         // Initialize AI client with config
         let ai_client = if let Some(api_key) = config.get_ai_api_key() {

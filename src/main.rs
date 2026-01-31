@@ -23,6 +23,10 @@ use tui::{app::App, input, ui};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env file (development)
+    // In production, env vars are set via deployment system
+    dotenv::dotenv().ok();
+    
     let args = Args::parse();
 
     // Ensure config directories exist
@@ -41,6 +45,19 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui() -> Result<()> {
+    // Setup terminal with panic handler for proper cleanup
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Restore terminal on panic
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        original_hook(panic_info);
+    }));
+    
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
