@@ -1,0 +1,50 @@
+# Cloudflare Workers Configuration for QHub Production
+# This file is safe to commit - it contains no secrets
+
+name = "qhub-api"
+main = "src/index.js"  # Update if using different entry point
+compatibility_date = "2024-01-01"
+workers_dev = false
+
+# D1 Database Binding
+[[d1_databases]]
+binding = "DB"  # Available as env.DB in Workers
+database_name = "qhub-production"
+database_id = "a52bc4fb-9185-4185-bb6e-572c3dd3feaf"
+
+# AI Gateway Binding (if using Cloudflare AI)
+[ai]
+binding = "AI"
+
+# Environment Variables (non-secret)
+[vars]
+ENVIRONMENT = "production"
+API_BASE_URL = "https://api.qhub.dev"
+AUTH_CALLBACK_URL = "https://qhub.dev/auth/callback"
+TOKEN_EXPIRY_HOURS = "24"
+LOG_LEVEL = "warn"
+
+# Secrets (set via: wrangler secret put <NAME>)
+# DO NOT PUT ACTUAL VALUES HERE!
+# - JWT_SECRET
+# - CLOUDFLARE_AI_TOKEN
+# - IBM_QUANTUM_TOKEN
+# - GITHUB_CLIENT_SECRET (if using OAuth)
+# - GOOGLE_CLIENT_SECRET (if using OAuth)
+
+# Routes (configure your custom domain)
+[[routes]]
+pattern = "api.qhub.dev/*"
+zone_name = "qhub.dev"
+
+# Rate Limiting
+[limits]
+cpu_ms = 50
+
+# Build Configuration
+[build]
+command = "cargo build --release"  # If deploying Rust
+# Or for Node.js: command = "npm run build"
+
+[build.upload]
+format = "service-worker"
