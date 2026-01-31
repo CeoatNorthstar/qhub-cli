@@ -193,6 +193,21 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                 content: input.clone(),
             });
             
+            // Keep conversation history manageable (last 20 messages + system prompt)
+            // This prevents token overflow and keeps context relevant
+            if self.conversation_history.len() > 21 {
+                // Keep system prompt (first message) and last 20 messages
+                let system_prompt = self.conversation_history[0].clone();
+                let recent_messages: Vec<_> = self.conversation_history
+                    .iter()
+                    .skip(self.conversation_history.len() - 20)
+                    .cloned()
+                    .collect();
+                
+                self.conversation_history = vec![system_prompt];
+                self.conversation_history.extend(recent_messages);
+            }
+            
             // Start async AI request
             self.is_loading = true;
             let (tx, rx) = mpsc::channel(1);
@@ -225,7 +240,20 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                     self.scroll_to_bottom();
                 }
                 Ok(Err(error)) => {
-                    self.messages.push(Message::error(format!("AI Error: {}", error)));
+                    // User-friendly error messages
+                    let friendly_error = if error.contains("timeout") {
+                        "Request timed out. The AI service might be busy. Please try again.".to_string()
+                    } else if error.contains("429") {
+                        "Rate limit reached. Please wait a moment before trying again.".to_string()
+                    } else if error.contains("401") || error.contains("403") {
+                        "Authentication failed. Please check your API key in CLOUDFLARE_AI_TOKEN environment variable.".to_string()
+                    } else if error.contains("network") || error.contains("connection") {
+                        "Network error. Please check your internet connection.".to_string()
+                    } else {
+                        format!("AI service error: {}", error)
+                    };
+                    
+                    self.messages.push(Message::error(friendly_error));
                     self.is_loading = false;
                     self.ai_response_rx = None;
                     self.scroll_to_bottom();
@@ -234,7 +262,9 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                     // Still waiting
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.messages.push(Message::error("AI request failed".to_string()));
+                    self.messages.push(Message::error(
+                        "AI request failed unexpectedly. Please try again.".to_string()
+                    ));
                     self.is_loading = false;
                     self.ai_response_rx = None;
                 }

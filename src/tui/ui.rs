@@ -109,6 +109,15 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         
         all_lines.push(Line::from(""));
     }
+    
+    // Show loading indicator
+    if app.is_loading {
+        all_lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("● ", Style::default().fg(CYAN).add_modifier(Modifier::SLOW_BLINK)),
+            Span::styled("thinking...", Style::default().fg(DIM_GRAY)),
+        ]));
+    }
 
     let total_lines = all_lines.len();
     let max_scroll = total_lines.saturating_sub(inner_height);

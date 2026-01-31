@@ -1,7 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use std::time::Duration;
 
 const CLOUDFLARE_GATEWAY_URL: &str = 
     "https://gateway.ai.cloudflare.com/v1/2d4b81ed42312401410d8ab4cd8c5dcf/northstars-industries/compat/chat/completions";
@@ -42,8 +42,15 @@ struct ResponseMessage {
 
 impl DeepSeekClient {
     pub fn new(api_key: String) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        
         Self {
-            client: Client::new(),
+            client,
             api_key,
         }
     }
@@ -59,33 +66,63 @@ impl DeepSeekClient {
     }
 
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String> {
-        let request = ChatRequest {
-            model: "deepseek/deepseek-chat".to_string(),
-            messages,
-            stream: false,
-        };
-
-        let response = self.client
-            .post(CLOUDFLARE_GATEWAY_URL)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error {}: {}", status, text);
-        }
-
-        let chat_response: ChatResponse = response.json().await?;
+        // Retry logic with exponential backoff
+        let max_retries = 3;
+        let mut attempt = 0;
         
-        chat_response
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| anyhow::anyhow!("No response from AI"))
+        loop {
+            attempt += 1;
+            
+            let request = ChatRequest {
+                model: "deepseek/deepseek-chat".to_string(),
+                messages: messages.clone(),
+                stream: false,
+            };
+
+            let result = self.client
+                .post(CLOUDFLARE_GATEWAY_URL)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "qhub-cli/0.1.0")
+                .json(&request)
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    
+                    if status.is_success() {
+                        let chat_response: ChatResponse = response.json().await?;
+                        return chat_response
+                            .choices
+                            .first()
+                            .map(|c| c.message.content.clone())
+                            .ok_or_else(|| anyhow::anyhow!("No response from AI"));
+                    }
+                    
+                    // Handle rate limiting with retry
+                    if status.as_u16() == 429 && attempt < max_retries {
+                        let backoff = Duration::from_secs(2u64.pow(attempt));
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    
+                    // Handle other errors
+                    let text = response.text().await.unwrap_or_default();
+                    anyhow::bail!("API error {}: {}", status, text);
+                }
+                Err(e) if attempt < max_retries && e.is_timeout() => {
+                    // Retry on timeout
+                    let backoff = Duration::from_secs(2u64.pow(attempt));
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
     }
 
     pub fn get_system_prompt() -> ChatMessage {
