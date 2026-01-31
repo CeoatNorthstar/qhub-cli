@@ -16,3 +16,12 @@
 
 # Local development
 docker-compose.override.yml
+
+# IDE
+.vscode/
+.idea/
+
+# Node
+node_modules/
+dist/
+.wrangler/
