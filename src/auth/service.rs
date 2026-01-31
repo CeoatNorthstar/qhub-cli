@@ -119,7 +119,7 @@ impl AuthService {
         }
 
         // Check if user already exists
-        let existing = sqlx::query!("SELECT id FROM users WHERE email = $1", req.email)
+        let existing = sqlx::query!("SELECT id FROM qhub.users WHERE email = $1", req.email)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -136,7 +136,7 @@ impl AuthService {
 
         sqlx::query!(
             r#"
-            INSERT INTO users (id, email, username, password_hash, tier, created_at, updated_at)
+            INSERT INTO qhub.users (id, email, username, password_hash, tier, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
             user_id,
@@ -158,7 +158,7 @@ impl AuthService {
             SELECT id, email, username, display_name, password_hash,
                    tier, created_at, updated_at, last_login_at,
                    is_active, email_verified
-            FROM users WHERE id = $1
+            FROM qhub.users WHERE id = $1
             "#,
             user_id
         )
@@ -173,7 +173,7 @@ impl AuthService {
         let session_id = Uuid::new_v4();
         sqlx::query!(
             r#"
-            INSERT INTO user_sessions (id, user_id, token_hash, expires_at, created_at, last_active_at)
+            INSERT INTO qhub.user_sessions (id, user_id, token_hash, expires_at, created_at, last_active_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             "#,
             session_id,
@@ -202,7 +202,7 @@ impl AuthService {
             SELECT id, email, username, display_name, password_hash,
                    tier, created_at, updated_at, last_login_at,
                    is_active, email_verified
-            FROM users WHERE email = $1
+            FROM qhub.users WHERE email = $1
             "#,
             req.email
         )
@@ -224,7 +224,7 @@ impl AuthService {
         }
 
         // Update last login
-        sqlx::query!("UPDATE users SET last_login_at = $1 WHERE id = $2", Utc::now(), user.id)
+        sqlx::query!("UPDATE qhub.users SET last_login_at = $1 WHERE id = $2", Utc::now(), user.id)
             .execute(&self.pool)
             .await?;
 
@@ -237,7 +237,7 @@ impl AuthService {
         let now = Utc::now();
         sqlx::query!(
             r#"
-            INSERT INTO user_sessions (id, user_id, token_hash, expires_at, created_at, last_active_at)
+            INSERT INTO qhub.user_sessions (id, user_id, token_hash, expires_at, created_at, last_active_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             "#,
             session_id,
@@ -268,7 +268,7 @@ impl AuthService {
             r#"
             SELECT id, user_id, token_hash, device_info, ip_address,
                    expires_at, created_at, last_active_at
-            FROM user_sessions WHERE token_hash = $1 AND expires_at > $2
+            FROM qhub.user_sessions WHERE token_hash = $1 AND expires_at > $2
             "#,
             token_hash,
             Utc::now()
@@ -279,7 +279,7 @@ impl AuthService {
 
         // Update last active
         sqlx::query!(
-            "UPDATE user_sessions SET last_active_at = $1 WHERE id = $2",
+            "UPDATE qhub.user_sessions SET last_active_at = $1 WHERE id = $2",
             Utc::now(),
             session.id
         )
@@ -294,7 +294,7 @@ impl AuthService {
             SELECT id, email, username, display_name, password_hash,
                    tier, created_at, updated_at, last_login_at,
                    is_active, email_verified
-            FROM users WHERE id = $1
+            FROM qhub.users WHERE id = $1
             "#,
             user_id
         )
@@ -308,7 +308,7 @@ impl AuthService {
     pub async fn logout(&self, token: &str) -> Result<()> {
         let token_hash = self.hash_token(token);
         
-        sqlx::query!("DELETE FROM user_sessions WHERE token_hash = $1", token_hash)
+        sqlx::query!("DELETE FROM qhub.user_sessions WHERE token_hash = $1", token_hash)
             .execute(&self.pool)
             .await?;
 
@@ -317,7 +317,7 @@ impl AuthService {
 
     /// Clean up expired sessions
     pub async fn cleanup_expired_sessions(&self) -> Result<u64> {
-        let result = sqlx::query!("DELETE FROM user_sessions WHERE expires_at < $1", Utc::now())
+        let result = sqlx::query!("DELETE FROM qhub.user_sessions WHERE expires_at < $1", Utc::now())
             .execute(&self.pool)
             .await?;
 
