@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::api::deepseek::{ChatMessage, DeepSeekClient};
+use crate::config::Config;
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -112,6 +113,7 @@ pub struct App {
     pub conversation_history: Vec<ChatMessage>,
     pub show_exit_animation: bool,
     pub exit_animation_frame: usize,
+    pub config: Config,
 }
 
 impl Default for App {
@@ -122,16 +124,33 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        let ai_client = DeepSeekClient::from_env()
-            .unwrap_or_else(DeepSeekClient::with_default_key);
+        // Load or create configuration
+        let config = Config::load().unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to load config: {}. Using defaults.", e);
+            Config::default()
+        });
+        
+        // Initialize AI client with config
+        let ai_client = if let Some(api_key) = config.get_ai_api_key() {
+            DeepSeekClient::new(api_key)
+        } else {
+            DeepSeekClient::with_default_key()
+        };
+        
+        // Extract user info from config
+        let (user_email, user_tier) = if let Some(ref user) = config.user {
+            (Some(user.email.clone()), user.tier.clone())
+        } else {
+            (None, "free".to_string())
+        };
         
         let mut app = Self {
             messages: Vec::new(),
             input: String::new(),
             input_mode: InputMode::Normal,
             scroll_offset: 0,
-            user_email: None,
-            user_tier: "free".to_string(),
+            user_email,
+            user_tier,
             is_connected: true,
             should_quit: false,
             is_loading: false,
@@ -140,10 +159,43 @@ impl App {
             conversation_history: vec![DeepSeekClient::get_system_prompt()],
             show_exit_animation: false,
             exit_animation_frame: 0,
+            config,
         };
 
+        // Check if first run
+        let is_first_run = !Config::exists();
+        
         // Welcome message
-        app.messages.push(Message::system(
+        let welcome_msg = if is_first_run {
+            format!(
+                r#"
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   ██████╗ ██╗  ██╗██╗   ██╗██████╗                               ║
+║  ██╔═══██╗██║  ██║██║   ██║██╔══██╗                              ║
+║  ██║   ██║███████║██║   ██║██████╔╝                              ║
+║  ██║▄▄ ██║██╔══██║██║   ██║██╔══██╗                              ║
+║  ╚██████╔╝██║  ██║╚██████╔╝██████╔╝                              ║
+║   ╚══▀▀═╝ ╚═╝  ╚═╝ ╚═════╝ ╚═════╝                               ║
+║                                                                   ║
+║   Quantum Computing + AI                                          ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Welcome to QHub! 🎉 First time setup detected.
+
+Configuration saved to: {}
+
+To get started:
+  • Set your AI API key:   export CLOUDFLARE_AI_TOKEN=your_key
+  • Use /help to see all commands
+  • Start chatting to generate quantum circuits!
+
+Example: "create a bell state circuit"
+"#,
+                Config::config_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "~/.qhub/config.toml".to_string())
+            )
+        } else {
             r#"
 ╔═══════════════════════════════════════════════════════════════════╗
 ║                                                                   ║
@@ -158,18 +210,21 @@ impl App {
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-Welcome to QHub! I can help you create and run quantum computing programs.
+Welcome back to QHub!
 
 Commands:
   /login     - Log in to your account
   /register  - Create a new account
   /upgrade   - Upgrade your plan
+  /status    - Show configuration status
   /help      - Show help
   /quit      - Exit QHub
 
 Describe what quantum computation you'd like to perform, and I'll generate the code for you.
 "#.to_string()
-        ));
+        };
+        
+        app.messages.push(Message::system(welcome_msg));
 
         app
     }
@@ -324,15 +379,74 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                 self.messages.push(Message::system("Chat cleared.".to_string()));
             }
             SlashCommand::Status => {
+                let config_path = Config::config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                
+                let ai_key_status = if self.config.get_ai_api_key().is_some() {
+                    "✓ Configured"
+                } else {
+                    "✗ Not set"
+                };
+                
+                let quantum_key_status = if self.config.get_quantum_api_key().is_some() {
+                    "✓ Configured"
+                } else {
+                    "✗ Not set"
+                };
+                
                 let status = if let Some(email) = &self.user_email {
                     format!(
-                        "Logged in as: {}\nTier: {}\nConnection: {}",
+                        r#"
+╭─────────────────────────────────────────────╮
+│ Account Status                              │
+├─────────────────────────────────────────────┤
+│ Email: {}
+│ Tier:  {}
+│ Status: {}
+├─────────────────────────────────────────────┤
+│ Configuration                               │
+├─────────────────────────────────────────────┤
+│ Config file: {}
+│ AI Provider: {} ({})
+│ Quantum Provider: {} ({})
+│ AI Model: {}
+╰─────────────────────────────────────────────╯
+"#,
                         email,
                         self.user_tier,
-                        if self.is_connected { "Connected" } else { "Disconnected" }
+                        if self.is_connected { "Connected" } else { "Disconnected" },
+                        config_path,
+                        self.config.ai.provider,
+                        ai_key_status,
+                        self.config.quantum.provider,
+                        quantum_key_status,
+                        self.config.ai.model,
                     )
                 } else {
-                    "Not logged in. Use /login or /register to get started.".to_string()
+                    format!(
+                        r#"
+╭─────────────────────────────────────────────╮
+│ Account Status                              │
+├─────────────────────────────────────────────┤
+│ Not logged in
+│ Use /login or /register to get started
+├─────────────────────────────────────────────┤
+│ Configuration                               │
+├─────────────────────────────────────────────┤
+│ Config file: {}
+│ AI Provider: {} ({})
+│ Quantum Provider: {} ({})
+│ AI Model: {}
+╰─────────────────────────────────────────────╯
+"#,
+                        config_path,
+                        self.config.ai.provider,
+                        ai_key_status,
+                        self.config.quantum.provider,
+                        quantum_key_status,
+                        self.config.ai.model,
+                    )
                 };
                 self.messages.push(Message::system(status));
             }
