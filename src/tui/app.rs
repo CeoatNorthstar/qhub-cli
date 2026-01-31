@@ -1,8 +1,10 @@
 use chrono::{DateTime, Local};
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use anyhow::Result;
 
 use crate::api::deepseek::{ChatMessage, DeepSeekClient};
+use crate::api::ApiClient;
 use crate::config::Config;
 
 #[derive(Debug, Clone)]
@@ -67,8 +69,9 @@ pub enum InputMode {
 
 #[derive(Debug, Clone)]
 pub enum SlashCommand {
-    Login,
-    Register,
+    Login { email: String, password: String },
+    Register { email: String, username: String, password: String },
+    Logout,
     Upgrade,
     Help,
     Quit,
@@ -84,10 +87,35 @@ impl SlashCommand {
             return None;
         }
 
-        let cmd = input[1..].split_whitespace().next()?.to_lowercase();
+        let parts: Vec<&str> = input[1..].split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let cmd = parts[0].to_lowercase();
         Some(match cmd.as_str() {
-            "login" => SlashCommand::Login,
-            "register" => SlashCommand::Register,
+            "login" => {
+                if parts.len() >= 3 {
+                    SlashCommand::Login {
+                        email: parts[1].to_string(),
+                        password: parts[2].to_string(),
+                    }
+                } else {
+                    SlashCommand::Unknown("login <email> <password>".to_string())
+                }
+            }
+            "register" => {
+                if parts.len() >= 4 {
+                    SlashCommand::Register {
+                        email: parts[1].to_string(),
+                        username: parts[2].to_string(),
+                        password: parts[3].to_string(),
+                    }
+                } else {
+                    SlashCommand::Unknown("register <email> <username> <password>".to_string())
+                }
+            }
+            "logout" => SlashCommand::Logout,
             "upgrade" => SlashCommand::Upgrade,
             "help" | "h" | "?" => SlashCommand::Help,
             "quit" | "q" | "exit" => SlashCommand::Quit,
@@ -110,10 +138,14 @@ pub struct App {
     pub is_loading: bool,
     pub ai_client: DeepSeekClient,
     pub ai_response_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    pub auth_response_rx: Option<mpsc::Receiver<Result<(String, String, String), String>>>,
     pub conversation_history: Vec<ChatMessage>,
-    pub show_exit_animation: bool,
-    pub exit_animation_frame: usize,
     pub config: Config,
+    pub api_client: ApiClient,
+    // Autocomplete
+    pub suggestions: Vec<String>,
+    pub selected_suggestion: usize,
+    pub show_suggestions: bool,
 }
 
 impl Default for App {
@@ -124,26 +156,53 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        // Load or create configuration
+        // 1. Load or create configuration
         let config = Config::load().unwrap_or_else(|e| {
             eprintln!("Warning: Failed to load config: {}. Using defaults.", e);
             Config::default()
         });
         
-        // Initialize AI client with config
+        // 2. Initialize API client
+        let mut api_client = ApiClient::new(config.api_url.clone())
+            .expect("Failed to create API client");
+        
+        // 3. Validate stored token if exists
+        let (user_email, user_tier, _is_authenticated) = if let Some(ref user_config) = config.user {
+            if let Some(ref token) = user_config.token {
+                api_client.set_token(token.clone());
+                
+                // Verify token is still valid
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        api_client.verify_token().await
+                    })
+                }) {
+                    Ok(user) => {
+                        eprintln!("✅ Session valid - Welcome back, {}!", user.email);
+                        (Some(user.email), user.tier, true)
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️  Session expired or invalid: {}", e);
+                        eprintln!("💡 Please login again with /login");
+                        api_client.clear_token();
+                        (None, "free".to_string(), false)
+                    }
+                }
+            } else {
+                (None, "free".to_string(), false)
+            }
+        } else {
+            (None, "free".to_string(), false)
+        };
+        
+        // 4. Initialize AI client with config
         let ai_client = if let Some(api_key) = config.get_ai_api_key() {
             DeepSeekClient::new(api_key)
         } else {
             DeepSeekClient::with_default_key()
         };
         
-        // Extract user info from config
-        let (user_email, user_tier) = if let Some(ref user) = config.user {
-            (Some(user.email.clone()), user.tier.clone())
-        } else {
-            (None, "free".to_string())
-        };
-        
+        // 5. Build App struct
         let mut app = Self {
             messages: Vec::new(),
             input: String::new(),
@@ -156,16 +215,19 @@ impl App {
             is_loading: false,
             ai_client,
             ai_response_rx: None,
+            auth_response_rx: None,
             conversation_history: vec![DeepSeekClient::get_system_prompt()],
-            show_exit_animation: false,
-            exit_animation_frame: 0,
             config,
+            api_client,
+            suggestions: Vec::new(),
+            selected_suggestion: 0,
+            show_suggestions: false,
         };
-
-        // Check if first run
+        
+        // 6. Add welcome message based on authentication state
         let is_first_run = !Config::exists();
         
-        // Welcome message
+        // Welcome message based on auth state
         let welcome_msg = if is_first_run {
             format!(
                 r#"
@@ -182,20 +244,35 @@ impl App {
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-Welcome to QHub! 🎉 First time setup detected.
+🎉 Welcome to QHub! First time setup detected.
 
 Configuration saved to: {}
 
-To get started:
-  • Set your AI API key:   export CLOUDFLARE_AI_TOKEN=your_key
-  • Use /help to see all commands
-  • Start chatting to generate quantum circuits!
+🔐 AUTHENTICATION REQUIRED
 
-Example: "create a bell state circuit"
+To use QHub, please create an account or log in:
+
+  /register <email> <username> <password>  - Create new account
+  /login <email> <password>                - Log in to existing account
+
+Why authenticate?
+  • Secure access to quantum computing resources
+  • Track your usage and job history  
+  • Access to premium features and support
+  • Persistent session across devices
+
+After logging in, you can:
+  • Generate quantum circuits with AI
+  • Execute circuits on real quantum hardware
+  • View your computation history
+  • Upgrade to Pro or Enterprise tiers
+
+Type /help for more commands.
 "#,
                 Config::config_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "~/.qhub/config.toml".to_string())
             )
-        } else {
+        } else if app.user_email.is_none() {
+            // Returning user but not logged in
             r#"
 ╔═══════════════════════════════════════════════════════════════════╗
 ║                                                                   ║
@@ -212,16 +289,53 @@ Example: "create a bell state circuit"
 
 Welcome back to QHub!
 
-Commands:
-  /login     - Log in to your account
-  /register  - Create a new account
+🔐 Please log in to continue:
+
+  /login <email> <password>                - Log in to your account
+  /register <email> <username> <password>  - Create new account
+  /help                                    - Show all commands
+
+Your session has expired. Please authenticate to access:
+  • AI-powered quantum circuit generation
+  • Quantum hardware execution
+  • Job history and analytics
+  • Premium features based on your tier
+"#.to_string()
+        } else {
+            // Logged in - show normal welcome
+            format!(
+                r#"
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   ██████╗ ██╗  ██╗██╗   ██╗██████╗                               ║
+║  ██╔═══██╗██║  ██║██║   ██║██╔══██╗                              ║
+║  ██║   ██║███████║██║   ██║██████╔╝                              ║
+║  ██║▄▄ ██║██╔══██║██║   ██║██╔══██╗                              ║
+║  ╚██████╔╝██║  ██║╚██████╔╝██████╔╝                              ║
+║   ╚══▀▀═╝ ╚═╝  ╚═╝ ╚═════╝ ╚═════╝                               ║
+║                                                                   ║
+║   Quantum Computing + AI                                          ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+✅ Logged in as: {}
+📊 Tier: {}
+
+Ready to compute! Commands:
+  /status    - Show account and system status
   /upgrade   - Upgrade your plan
-  /status    - Show configuration status
-  /help      - Show help
+  /logout    - Log out
+  /help      - Show all commands
   /quit      - Exit QHub
 
-Describe what quantum computation you'd like to perform, and I'll generate the code for you.
-"#.to_string()
+Start generating quantum circuits:
+  "Create a Bell state circuit"
+  "Generate a Grover search algorithm"
+  "Build a quantum Fourier transform"
+"#,
+                app.user_email.as_ref().unwrap(),
+                app.user_tier.to_uppercase()
+            )
         };
         
         app.messages.push(Message::system(welcome_msg));
@@ -239,7 +353,14 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
         if let Some(cmd) = SlashCommand::parse(&input) {
             self.handle_slash_command(cmd);
         } else {
-            // Regular message to AI
+            // Regular message to AI - require authentication
+            if self.user_email.is_none() {
+                self.messages.push(Message::error(
+                    "⚠️  Authentication required. Please /login or /register first.".to_string()
+                ));
+                return;
+            }
+            
             self.messages.push(Message::user(input.clone()));
             
             // Add to conversation history
@@ -327,19 +448,137 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
         }
     }
 
+    pub fn check_auth_response(&mut self) {
+        if let Some(ref mut rx) = self.auth_response_rx {
+            match rx.try_recv() {
+                Ok(Ok((token, email, tier))) => {
+                    // Save token to API client
+                    self.api_client.set_token(token.clone());
+                    
+                    // Save to config
+                    self.config.user = Some(crate::config::settings::UserConfig {
+                        email: email.clone(),
+                        token: Some(token),
+                        tier: tier.clone(),
+                    });
+                    
+                    if let Err(e) = self.config.save() {
+                        self.messages.push(Message::error(
+                            format!("Failed to save config: {}", e)
+                        ));
+                    } else {
+                        self.user_email = Some(email.clone());
+                        self.user_tier = tier.clone();
+                        self.messages.push(Message::system(
+                            format!("✓ Logged in successfully as {} ({})", email, tier)
+                        ));
+                    }
+                    
+                    self.is_loading = false;
+                    self.auth_response_rx = None;
+                    self.scroll_to_bottom();
+                }
+                Ok(Err(error)) => {
+                    let friendly_error = if error.contains("already registered") {
+                        "Email is already registered. Try logging in instead.".to_string()
+                    } else if error.contains("Invalid email or password") {
+                        "Invalid email or password. Please try again.".to_string()
+                    } else if error.contains("Invalid email format") {
+                        "Invalid email format. Please use a valid email address.".to_string()
+                    } else if error.contains("deactivated") {
+                        "Account is deactivated. Contact support for assistance.".to_string()
+                    } else {
+                        format!("Authentication error: {}", error)
+                    };
+                    
+                    self.messages.push(Message::error(friendly_error));
+                    self.is_loading = false;
+                    self.auth_response_rx = None;
+                    self.scroll_to_bottom();
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // Still waiting
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.messages.push(Message::error(
+                        "Authentication request failed. Please try again.".to_string()
+                    ));
+                    self.is_loading = false;
+                    self.auth_response_rx = None;
+                }
+            }
+        }
+    }
+
     fn handle_slash_command(&mut self, cmd: SlashCommand) {
         match cmd {
-            SlashCommand::Login => {
-                self.messages.push(Message::system(
-                    "Opening login page in your browser...".to_string()
-                ));
-                // TODO: Open browser for login
+            SlashCommand::Login { email, password } => {
+                self.messages.push(Message::system("🔄 Logging in...".to_string()));
+                self.is_loading = true;
+                
+                let api_client = self.api_client.clone();
+                let (tx, rx) = mpsc::channel(1);
+                self.auth_response_rx = Some(rx);
+                
+                tokio::spawn(async move {
+                    let result = api_client.login(crate::api::client::LoginRequest {
+                        email,
+                        password,
+                    }).await;
+                    
+                    let response = match result {
+                        Ok(auth_resp) => {
+                            Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = tx.send(response).await;
+                });
             }
-            SlashCommand::Register => {
-                self.messages.push(Message::system(
-                    "Opening registration page in your browser...".to_string()
-                ));
-                // TODO: Open browser for registration
+            SlashCommand::Register { email, username, password } => {
+                self.messages.push(Message::system("🔄 Creating account...".to_string()));
+                self.is_loading = true;
+                
+                let api_client = self.api_client.clone();
+                let (tx, rx) = mpsc::channel(1);
+                self.auth_response_rx = Some(rx);
+                
+                tokio::spawn(async move {
+                    let result = api_client.register(crate::api::client::RegisterRequest {
+                        email,
+                        username: Some(username),
+                        password,
+                    }).await;
+                    
+                    let response = match result {
+                        Ok(auth_resp) => {
+                            Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = tx.send(response).await;
+                });
+            }
+            SlashCommand::Logout => {
+                // Call logout API to invalidate session
+                let api_client = self.api_client.clone();
+                tokio::spawn(async move {
+                    let _ = api_client.logout().await;
+                });
+                
+                // Clear local state
+                self.api_client.clear_token();
+                self.config.user = None;
+                self.user_email = None;
+                self.user_tier = "free".to_string();
+                
+                if let Err(e) = self.config.save() {
+                    self.messages.push(Message::error(
+                        format!("Failed to save config: {}", e)
+                    ));
+                } else {
+                    self.messages.push(Message::system("✓ Logged out successfully".to_string()));
+                }
             }
             SlashCommand::Upgrade => {
                 self.messages.push(Message::system(
@@ -353,8 +592,12 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
 ╭──────────────────────────────────────────────────────────────────╮
 │                         QHub Commands                            │
 ├──────────────────────────────────────────────────────────────────┤
-│  /login      Log in to your QHub account                         │
-│  /register   Create a new account                                │
+│  /login <email> <password>                                       │
+│      Log in to your QHub account                                 │
+│  /register <email> <username> <password>                         │
+│      Create a new account                                        │
+│  /logout                                                         │
+│      Log out from your account                                   │
 │  /upgrade    Upgrade to Pro for more quantum backends            │
 │  /status     Show your current account status                    │
 │  /clear      Clear the chat history                              │
@@ -371,8 +614,8 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                 ));
             }
             SlashCommand::Quit => {
-                self.show_exit_animation = true;
-                self.exit_animation_frame = 0;
+                // Clean exit without animation to prevent escape codes
+                self.should_quit = true;
             }
             SlashCommand::Clear => {
                 self.messages.clear();
@@ -408,6 +651,7 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
 │ Configuration                               │
 ├─────────────────────────────────────────────┤
 │ Config file: {}
+│ API URL: {}
 │ AI Provider: {} ({})
 │ Quantum Provider: {} ({})
 │ AI Model: {}
@@ -417,6 +661,7 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                         self.user_tier,
                         if self.is_connected { "Connected" } else { "Disconnected" },
                         config_path,
+                        self.config.api_url,
                         self.config.ai.provider,
                         ai_key_status,
                         self.config.quantum.provider,
@@ -435,12 +680,14 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
 │ Configuration                               │
 ├─────────────────────────────────────────────┤
 │ Config file: {}
+│ API URL: {}
 │ AI Provider: {} ({})
 │ Quantum Provider: {} ({})
 │ AI Model: {}
 ╰─────────────────────────────────────────────╯
 "#,
                         config_path,
+                        self.config.api_url,
                         self.config.ai.provider,
                         ai_key_status,
                         self.config.quantum.provider,
@@ -452,7 +699,7 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
             }
             SlashCommand::Unknown(cmd) => {
                 self.messages.push(Message::error(
-                    format!("Unknown command: /{}. Type /help for available commands.", cmd)
+                    format!("Unknown command or invalid syntax: /{}. Type /help for available commands.", cmd)
                 ));
             }
         }
@@ -473,5 +720,99 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
     pub fn scroll_to_bottom(&mut self) {
         // Will be calculated properly in UI rendering
         self.scroll_offset = usize::MAX;
+    }
+    
+    /// Check if user is authenticated
+    pub fn is_authenticated(&self) -> bool {
+        self.user_email.is_some()
+    }
+    
+    /// Get available commands based on authentication state
+    pub fn get_available_commands(&self) -> Vec<(&str, &str)> {
+        let mut commands = vec![
+            ("/help", "Show all available commands"),
+            ("/status", "Show account and system status"),
+            ("/clear", "Clear the message history"),
+            ("/quit", "Exit QHub"),
+        ];
+        
+        if self.is_authenticated() {
+            commands.extend_from_slice(&[
+                ("/logout", "Log out of your account"),
+                ("/upgrade", "Upgrade your subscription tier"),
+            ]);
+        } else {
+            commands.extend_from_slice(&[
+                ("/login", "Log in to your account (usage: /login <email> <password>)"),
+                ("/register", "Create a new account (usage: /register <email> <username> <password>)"),
+            ]);
+        }
+        
+        commands
+    }
+    
+    /// Update command suggestions based on current input
+    pub fn update_suggestions(&mut self) {
+        let input = self.input.trim();
+        
+        // Only show suggestions if input starts with /
+        if !input.starts_with('/') || input.len() <= 1 {
+            self.suggestions.clear();
+            self.show_suggestions = false;
+            return;
+        }
+        
+        // Get the command part (before any space)
+        let cmd_part = input[1..].split_whitespace().next().unwrap_or(&input[1..]);
+        
+        // Find matching commands
+        let commands = self.get_available_commands();
+        self.suggestions = commands
+            .iter()
+            .filter(|(cmd, _)| cmd[1..].starts_with(cmd_part))
+            .map(|(cmd, desc)| format!("{} - {}", cmd, desc))
+            .collect();
+        
+        self.show_suggestions = !self.suggestions.is_empty();
+        
+        // Reset selection if suggestions changed
+        if self.selected_suggestion >= self.suggestions.len() {
+            self.selected_suggestion = 0;
+        }
+    }
+    
+    /// Navigate suggestions with arrow keys
+    pub fn select_next_suggestion(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected_suggestion = (self.selected_suggestion + 1) % self.suggestions.len();
+        }
+    }
+    
+    pub fn select_prev_suggestion(&mut self) {
+        if !self.suggestions.is_empty() {
+            if self.selected_suggestion == 0 {
+                self.selected_suggestion = self.suggestions.len() - 1;
+            } else {
+                self.selected_suggestion -= 1;
+            }
+        }
+    }
+    
+    /// Apply the selected suggestion (Tab or Enter on suggestion)
+    pub fn apply_suggestion(&mut self) {
+        if self.show_suggestions && !self.suggestions.is_empty() {
+            let suggestion = &self.suggestions[self.selected_suggestion];
+            // Extract just the command part (before " - ")
+            if let Some(cmd) = suggestion.split(" - ").next() {
+                self.input = cmd.to_string();
+                // Add space for commands that need arguments
+                if matches!(cmd, "/login" | "/register" | "/upgrade") {
+                    self.input.push(' ');
+                }
+            }
+            self.suggestions.clear();
+            self.show_suggestions = false;
+            self.selected_suggestion = 0;
+        }
     }
 }

@@ -24,17 +24,35 @@ pub fn handle_events(app: &mut App, timeout: Duration) -> Result<bool> {
                         KeyCode::Enter => {
                             app.submit_input();
                         }
+                        KeyCode::Tab => {
+                            // Apply suggestion with Tab
+                            if app.show_suggestions {
+                                app.apply_suggestion();
+                            }
+                        }
                         KeyCode::Char(c) => {
                             app.input.push(c);
+                            app.update_suggestions();
                         }
                         KeyCode::Backspace => {
                             app.input.pop();
+                            app.update_suggestions();
                         }
                         KeyCode::Up => {
-                            app.scroll_up();
+                            // Navigate suggestions if showing, otherwise scroll
+                            if app.show_suggestions {
+                                app.select_prev_suggestion();
+                            } else {
+                                app.scroll_up();
+                            }
                         }
                         KeyCode::Down => {
-                            app.scroll_down();
+                            // Navigate suggestions if showing, otherwise scroll
+                            if app.show_suggestions {
+                                app.select_next_suggestion();
+                            } else {
+                                app.scroll_down();
+                            }
                         }
                         KeyCode::PageUp => {
                             for _ in 0..10 {

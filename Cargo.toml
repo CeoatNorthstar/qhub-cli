@@ -60,3 +60,39 @@ base64 = "0.21"
 
 # URL opening for OAuth
 webbrowser = "0.8"
+sha2 = "0.10.9"
+
+# ============================================================================
+# BUILD PROFILES - Environment-Specific Builds
+# ============================================================================
+
+[profile.dev]
+# Fast compilation for local development
+# Defaults to http://localhost:8787
+
+[profile.release]
+# Optimized release build
+# Defaults to staging URL for testing
+
+[profile.staging]
+inherits = "release"
+# Use for staging deployments
+# Defaults to https://qhub-api-staging.a-contactnaol.workers.dev
+
+[profile.production]
+inherits = "release"
+# Use for production deployments
+# Defaults to https://qhub-api-production.a-contactnaol.workers.dev
+
+[features]
+# Feature flag for production builds
+production = []
+staging = []
+
+# Usage:
+#   cargo build                          # Debug build (localhost)
+#   cargo build --release                # Release build (staging)
+#   cargo build --release --features production  # Production build
+#   cargo build --profile staging        # Staging profile
+#   cargo build --profile production     # Production profile
+

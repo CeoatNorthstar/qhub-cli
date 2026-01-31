@@ -17,26 +17,34 @@ const SOFT_RED: Color = Color::Rgb(200, 100, 100);
 const CYAN: Color = Color::Rgb(0, 205, 205);  // Smooth cyan
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // Show goodbye screen
-    if app.show_exit_animation {
-        render_goodbye(frame);
-        return;
-    }
+    // Calculate suggestion height dynamically
+    let suggestion_height = if app.show_suggestions {
+        (app.suggestions.len().min(5) + 2) as u16  // Max 5 suggestions + border
+    } else {
+        0
+    };
     
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Header - minimal
-            Constraint::Min(10),    // Messages
-            Constraint::Length(3),  // Input
-            Constraint::Length(1),  // Status bar
+            Constraint::Length(1),              // Header - minimal
+            Constraint::Min(10),                // Messages
+            Constraint::Length(3),              // Input
+            Constraint::Length(suggestion_height), // Suggestions (dynamic)
+            Constraint::Length(1),              // Status bar
         ])
         .split(frame.area());
 
     render_header(frame, chunks[0]);
     render_messages(frame, app, chunks[1]);
     render_input(frame, app, chunks[2]);
-    render_status_bar(frame, app, chunks[3]);
+    
+    // Render suggestions if showing
+    if app.show_suggestions {
+        render_suggestions(frame, app, chunks[3]);
+    }
+    
+    render_status_bar(frame, app, chunks[4]);
 }
 
 fn render_header(frame: &mut Frame, area: Rect) {
@@ -45,21 +53,6 @@ fn render_header(frame: &mut Frame, area: Rect) {
     ]));
     
     frame.render_widget(header, area);
-}
-
-fn render_goodbye(frame: &mut Frame) {
-    let area = frame.area();
-    let text = vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled("goodbye", Style::default().fg(CYAN))),
-        Line::from(""),
-    ];
-    
-    let paragraph = Paragraph::new(text)
-        .alignment(ratatui::layout::Alignment::Center);
-    
-    frame.render_widget(paragraph, area);
 }
 
 fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -162,7 +155,12 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_text = if app.is_loading {
         Span::styled("...", Style::default().fg(DIM_GRAY))
     } else if app.input.is_empty() {
-        Span::styled("Type a message...", Style::default().fg(DIM_GRAY))
+        // Show helpful hint based on auth status
+        if app.user_email.is_some() {
+            Span::styled("Type a message or / for commands...", Style::default().fg(DIM_GRAY))
+        } else {
+            Span::styled("Type /login or /register to get started...", Style::default().fg(DIM_GRAY))
+        }
     } else {
         Span::styled(&app.input, Style::default().fg(MUTED_WHITE))
     };
@@ -197,8 +195,53 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         },
         Span::styled(" · ", Style::default().fg(DIM_GRAY)),
         Span::styled("esc to exit", Style::default().fg(DIM_GRAY)),
+        Span::styled(" · ", Style::default().fg(DIM_GRAY)),
+        Span::styled("tab for commands", Style::default().fg(DIM_GRAY)),
     ];
 
     let status_widget = Paragraph::new(Line::from(status_parts));
     frame.render_widget(status_widget, area);
+}
+
+fn render_suggestions(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height < 2 {
+        return; // Not enough space
+    }
+    
+    // Create suggestion lines with highlighting for selected item
+    let suggestions: Vec<Line> = app.suggestions
+        .iter()
+        .enumerate()
+        .take(5)  // Max 5 visible suggestions
+        .map(|(i, suggestion)| {
+            let is_selected = i == app.selected_suggestion;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_WHITE)
+            };
+            
+            let prefix = if is_selected { " ▶ " } else { "   " };
+            Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(suggestion, style),
+            ])
+        })
+        .collect();
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(CYAN))
+        .title(Span::styled(
+            " Suggestions (↑↓ to navigate, Tab to select) ",
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        ));
+    
+    let paragraph = Paragraph::new(suggestions)
+        .block(block);
+    
+    frame.render_widget(paragraph, area);
 }

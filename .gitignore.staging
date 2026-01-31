@@ -1,0 +1,14 @@
+# Staging branch allows .env.local for team sharing
+# But still ignores truly sensitive files
+
+/target
+
+# Only ignore main .env (production secrets)
+.env
+
+# Database
+*.db-shm
+*.db-wal
+
+# Local overrides
+docker-compose.override.yml

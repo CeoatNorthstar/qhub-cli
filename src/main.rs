@@ -3,8 +3,6 @@ mod tui;
 mod config;
 mod api;
 mod quantum;
-mod auth;
-mod db;
 
 use anyhow::Result;
 use clap::Parser;
@@ -23,6 +21,10 @@ use tui::{app::App, input, ui};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env file (development)
+    // In production, env vars are set via deployment system
+    dotenv::dotenv().ok();
+    
     let args = Args::parse();
 
     // Ensure config directories exist
@@ -41,6 +43,19 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui() -> Result<()> {
+    // Setup terminal with panic handler for proper cleanup
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Restore terminal on panic
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        original_hook(panic_info);
+    }));
+    
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -57,25 +72,14 @@ async fn run_tui() -> Result<()> {
         // Check for AI responses
         app.check_ai_response();
         
+        // Check for auth responses
+        app.check_auth_response();
+        
         // Draw UI
         terminal.draw(|f| ui::render(f, &mut app))?;
 
-        // Handle goodbye screen
-        if app.show_exit_animation {
-            app.exit_animation_frame += 1;
-            // Show for ~1.5 seconds (30 frames at 50ms)
-            if app.exit_animation_frame > 30 {
-                break;
-            }
-            std::thread::sleep(tick_rate);
-            continue;
-        }
-
-        if input::handle_events(&mut app, tick_rate)? {
-            break;
-        }
-
-        if app.should_quit {
+        // Check for exit
+        if app.should_quit || input::handle_events(&mut app, tick_rate)? {
             break;
         }
     }
@@ -88,6 +92,11 @@ async fn run_tui() -> Result<()> {
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
+    
+    // Explicit ANSI reset to prevent escape code leakage
+    // This ensures any residual formatting is cleared
+    print!("\x1b[0m");
+    std::io::Write::flush(&mut std::io::stdout())?;
 
     Ok(())
 }
