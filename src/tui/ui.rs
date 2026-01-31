@@ -155,7 +155,12 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_text = if app.is_loading {
         Span::styled("...", Style::default().fg(DIM_GRAY))
     } else if app.input.is_empty() {
-        Span::styled("Type a message...", Style::default().fg(DIM_GRAY))
+        // Show helpful hint based on auth status
+        if app.user_email.is_some() {
+            Span::styled("Type a message or / for commands...", Style::default().fg(DIM_GRAY))
+        } else {
+            Span::styled("Type /login or /register to get started...", Style::default().fg(DIM_GRAY))
+        }
     } else {
         Span::styled(&app.input, Style::default().fg(MUTED_WHITE))
     };
@@ -190,6 +195,8 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         },
         Span::styled(" · ", Style::default().fg(DIM_GRAY)),
         Span::styled("esc to exit", Style::default().fg(DIM_GRAY)),
+        Span::styled(" · ", Style::default().fg(DIM_GRAY)),
+        Span::styled("tab for commands", Style::default().fg(DIM_GRAY)),
     ];
 
     let status_widget = Paragraph::new(Line::from(status_parts));

@@ -92,6 +92,11 @@ async fn run_tui() -> Result<()> {
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
+    
+    // Explicit ANSI reset to prevent escape code leakage
+    // This ensures any residual formatting is cleared
+    print!("\x1b[0m");
+    std::io::Write::flush(&mut std::io::stdout())?;
 
     Ok(())
 }
