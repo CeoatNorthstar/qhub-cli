@@ -15,7 +15,7 @@ pub fn handle_events(app: &mut App, timeout: Duration) -> Result<bool> {
                 
                 match app.input_mode {
                     InputMode::Normal => match key.code {
-                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Esc => {
                             return Ok(true);
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

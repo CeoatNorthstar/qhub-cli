@@ -2,9 +2,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "qhub")]
-#[command(author = "QHub Team")]
-#[command(version = "0.1.0")]
-#[command(about = "Quantum computing CLI with AI-powered code generation", long_about = None)]
+#[command(version)]
+#[command(about = "Quantum AI assistant")]
 pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -12,12 +11,9 @@ pub struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
-    /// Run a quantum program
-    #[command(name = "rr")]
+    /// Run a .qqb file
     Run {
-        /// The .qqb file to run
+        /// Path to the quantum program
         file: String,
     },
-    /// Show version information
-    Version,
 }

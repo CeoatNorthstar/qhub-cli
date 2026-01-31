@@ -31,11 +31,7 @@ async fn main() -> Result<()> {
         Some(cli::Command::Run { file }) => {
             cli::commands::execute_run(&file).await?;
         }
-        Some(cli::Command::Version) => {
-            println!("qhub version {}", env!("CARGO_PKG_VERSION"));
-        }
         None => {
-            // No subcommand - start TUI
             run_tui().await?;
         }
     }
@@ -60,26 +56,22 @@ async fn run_tui() -> Result<()> {
         // Check for AI responses
         app.check_ai_response();
         
-        // Handle exit animation
-        if app.show_exit_animation {
-            app.exit_animation_frame += 1;
-            // Show animation for ~2 seconds (40 frames at 50ms)
-            if app.exit_animation_frame > 40 {
-                break;
-            }
-        }
-        
         // Draw UI
         terminal.draw(|f| ui::render(f, &mut app))?;
 
-        // Handle input (skip during exit animation)
-        if !app.show_exit_animation {
-            if input::handle_events(&mut app, tick_rate)? {
+        // Handle goodbye screen
+        if app.show_exit_animation {
+            app.exit_animation_frame += 1;
+            // Show for ~1.5 seconds (30 frames at 50ms)
+            if app.exit_animation_frame > 30 {
                 break;
             }
-        } else {
-            // Just sleep during animation
             std::thread::sleep(tick_rate);
+            continue;
+        }
+
+        if input::handle_events(&mut app, tick_rate)? {
+            break;
         }
 
         if app.should_quit {
@@ -87,12 +79,12 @@ async fn run_tui() -> Result<()> {
         }
     }
 
-    // Restore terminal
+    // Restore terminal - order matters!
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
 
