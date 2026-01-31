@@ -1,9 +1,13 @@
 use chrono::{DateTime, Local};
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use sqlx::PgPool;
+use std::sync::Arc;
 
 use crate::api::deepseek::{ChatMessage, DeepSeekClient};
 use crate::config::Config;
+use crate::auth::service::AuthService;
+use crate::db::{CreateUserRequest, LoginRequest};
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -67,8 +71,9 @@ pub enum InputMode {
 
 #[derive(Debug, Clone)]
 pub enum SlashCommand {
-    Login,
-    Register,
+    Login { email: String, password: String },
+    Register { email: String, username: String, password: String },
+    Logout,
     Upgrade,
     Help,
     Quit,
@@ -84,10 +89,35 @@ impl SlashCommand {
             return None;
         }
 
-        let cmd = input[1..].split_whitespace().next()?.to_lowercase();
+        let parts: Vec<&str> = input[1..].split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let cmd = parts[0].to_lowercase();
         Some(match cmd.as_str() {
-            "login" => SlashCommand::Login,
-            "register" => SlashCommand::Register,
+            "login" => {
+                if parts.len() >= 3 {
+                    SlashCommand::Login {
+                        email: parts[1].to_string(),
+                        password: parts[2].to_string(),
+                    }
+                } else {
+                    SlashCommand::Unknown("login <email> <password>".to_string())
+                }
+            }
+            "register" => {
+                if parts.len() >= 4 {
+                    SlashCommand::Register {
+                        email: parts[1].to_string(),
+                        username: parts[2].to_string(),
+                        password: parts[3].to_string(),
+                    }
+                } else {
+                    SlashCommand::Unknown("register <email> <username> <password>".to_string())
+                }
+            }
+            "logout" => SlashCommand::Logout,
             "upgrade" => SlashCommand::Upgrade,
             "help" | "h" | "?" => SlashCommand::Help,
             "quit" | "q" | "exit" => SlashCommand::Quit,
@@ -110,10 +140,12 @@ pub struct App {
     pub is_loading: bool,
     pub ai_client: DeepSeekClient,
     pub ai_response_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    pub auth_response_rx: Option<mpsc::Receiver<Result<(String, String, String), String>>>,
     pub conversation_history: Vec<ChatMessage>,
     pub show_exit_animation: bool,
     pub exit_animation_frame: usize,
     pub config: Config,
+    pub auth_service: Option<Arc<AuthService>>,
 }
 
 impl Default for App {
@@ -129,6 +161,23 @@ impl App {
             eprintln!("Warning: Failed to load config: {}. Using defaults.", e);
             Config::default()
         });
+        
+        // Initialize auth service if DATABASE_URL is available
+        let auth_service = std::env::var("DATABASE_URL")
+            .ok()
+            .and_then(|url| {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        PgPool::connect(&url).await.ok()
+                    })
+                })
+            })
+            .and_then(|pool| AuthService::new(pool).ok())
+            .map(Arc::new);
+        
+        if auth_service.is_none() {
+            eprintln!("⚠️  Warning: Database not available. Auth features disabled.");
+        }
         
         // Initialize AI client with config
         let ai_client = if let Some(api_key) = config.get_ai_api_key() {
@@ -156,10 +205,12 @@ impl App {
             is_loading: false,
             ai_client,
             ai_response_rx: None,
+            auth_response_rx: None,
             conversation_history: vec![DeepSeekClient::get_system_prompt()],
             show_exit_animation: false,
             exit_animation_frame: 0,
             config,
+            auth_service,
         };
 
         // Check if first run
@@ -327,19 +378,149 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
         }
     }
 
+    pub fn check_auth_response(&mut self) {
+        if let Some(ref mut rx) = self.auth_response_rx {
+            match rx.try_recv() {
+                Ok(Ok((token, email, tier))) => {
+                    // Save to config
+                    self.config.user = Some(crate::config::settings::UserConfig {
+                        email: email.clone(),
+                        token: Some(token),
+                        tier: tier.clone(),
+                    });
+                    
+                    if let Err(e) = self.config.save() {
+                        self.messages.push(Message::error(
+                            format!("Failed to save config: {}", e)
+                        ));
+                    } else {
+                        self.user_email = Some(email.clone());
+                        self.user_tier = tier.clone();
+                        self.messages.push(Message::system(
+                            format!("✓ Logged in successfully as {} ({})", email, tier)
+                        ));
+                    }
+                    
+                    self.is_loading = false;
+                    self.auth_response_rx = None;
+                    self.scroll_to_bottom();
+                }
+                Ok(Err(error)) => {
+                    let friendly_error = if error.contains("already registered") {
+                        "Email is already registered. Try logging in instead.".to_string()
+                    } else if error.contains("Invalid email or password") {
+                        "Invalid email or password. Please try again.".to_string()
+                    } else if error.contains("Invalid email format") {
+                        "Invalid email format. Please use a valid email address.".to_string()
+                    } else if error.contains("deactivated") {
+                        "Account is deactivated. Contact support for assistance.".to_string()
+                    } else {
+                        format!("Authentication error: {}", error)
+                    };
+                    
+                    self.messages.push(Message::error(friendly_error));
+                    self.is_loading = false;
+                    self.auth_response_rx = None;
+                    self.scroll_to_bottom();
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // Still waiting
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.messages.push(Message::error(
+                        "Authentication request failed. Please try again.".to_string()
+                    ));
+                    self.is_loading = false;
+                    self.auth_response_rx = None;
+                }
+            }
+        }
+    }
+
     fn handle_slash_command(&mut self, cmd: SlashCommand) {
         match cmd {
-            SlashCommand::Login => {
-                self.messages.push(Message::system(
-                    "Opening login page in your browser...".to_string()
-                ));
-                // TODO: Open browser for login
+            SlashCommand::Login { email, password } => {
+                if self.auth_service.is_none() {
+                    self.messages.push(Message::error(
+                        "Authentication service unavailable. Check DATABASE_URL.".to_string()
+                    ));
+                    self.input.clear();
+                    return;
+                }
+                
+                self.messages.push(Message::system("🔄 Logging in...".to_string()));
+                self.is_loading = true;
+                
+                let auth_service = Arc::clone(self.auth_service.as_ref().unwrap());
+                let (tx, rx) = mpsc::channel(1);
+                self.auth_response_rx = Some(rx);
+                
+                tokio::spawn(async move {
+                    let result = auth_service.login(LoginRequest {
+                        email: email.clone(),
+                        password,
+                    }).await;
+                    
+                    let response = match result {
+                        Ok(auth_resp) => Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier)),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = tx.send(response).await;
+                });
             }
-            SlashCommand::Register => {
-                self.messages.push(Message::system(
-                    "Opening registration page in your browser...".to_string()
-                ));
-                // TODO: Open browser for registration
+            SlashCommand::Register { email, username, password } => {
+                if self.auth_service.is_none() {
+                    self.messages.push(Message::error(
+                        "Authentication service unavailable. Check DATABASE_URL.".to_string()
+                    ));
+                    self.input.clear();
+                    return;
+                }
+                
+                self.messages.push(Message::system("🔄 Creating account...".to_string()));
+                self.is_loading = true;
+                
+                let auth_service = Arc::clone(self.auth_service.as_ref().unwrap());
+                let (tx, rx) = mpsc::channel(1);
+                self.auth_response_rx = Some(rx);
+                
+                tokio::spawn(async move {
+                    let result = auth_service.register(CreateUserRequest {
+                        email: email.clone(),
+                        username: Some(username),
+                        password,
+                    }).await;
+                    
+                    let response = match result {
+                        Ok(auth_resp) => Ok((auth_resp.token, auth_resp.user.email, auth_resp.user.tier)),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = tx.send(response).await;
+                });
+            }
+            SlashCommand::Logout => {
+                if let Some(ref mut user_config) = self.config.user {
+                    if let Some(token) = user_config.token.take() {
+                        if let Some(service) = &self.auth_service {
+                            let service = service.clone();
+                            tokio::spawn(async move {
+                                let _ = service.logout(&token).await;
+                            });
+                        }
+                    }
+                }
+                
+                self.config.user = None;
+                self.user_email = None;
+                self.user_tier = "free".to_string();
+                
+                if let Err(e) = self.config.save() {
+                    self.messages.push(Message::error(
+                        format!("Failed to save config: {}", e)
+                    ));
+                } else {
+                    self.messages.push(Message::system("✓ Logged out successfully".to_string()));
+                }
             }
             SlashCommand::Upgrade => {
                 self.messages.push(Message::system(
@@ -353,8 +534,12 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
 ╭──────────────────────────────────────────────────────────────────╮
 │                         QHub Commands                            │
 ├──────────────────────────────────────────────────────────────────┤
-│  /login      Log in to your QHub account                         │
-│  /register   Create a new account                                │
+│  /login <email> <password>                                       │
+│      Log in to your QHub account                                 │
+│  /register <email> <username> <password>                         │
+│      Create a new account                                        │
+│  /logout                                                         │
+│      Log out from your account                                   │
 │  /upgrade    Upgrade to Pro for more quantum backends            │
 │  /status     Show your current account status                    │
 │  /clear      Clear the chat history                              │
@@ -395,6 +580,12 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                     "✗ Not set"
                 };
                 
+                let db_status = if self.auth_service.is_some() {
+                    "✓ Connected"
+                } else {
+                    "✗ Not available"
+                };
+                
                 let status = if let Some(email) = &self.user_email {
                     format!(
                         r#"
@@ -408,6 +599,7 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
 │ Configuration                               │
 ├─────────────────────────────────────────────┤
 │ Config file: {}
+│ Database: {}
 │ AI Provider: {} ({})
 │ Quantum Provider: {} ({})
 │ AI Model: {}
@@ -417,6 +609,7 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
                         self.user_tier,
                         if self.is_connected { "Connected" } else { "Disconnected" },
                         config_path,
+                        db_status,
                         self.config.ai.provider,
                         ai_key_status,
                         self.config.quantum.provider,
@@ -435,12 +628,14 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
 │ Configuration                               │
 ├─────────────────────────────────────────────┤
 │ Config file: {}
+│ Database: {}
 │ AI Provider: {} ({})
 │ Quantum Provider: {} ({})
 │ AI Model: {}
 ╰─────────────────────────────────────────────╯
 "#,
                         config_path,
+                        db_status,
                         self.config.ai.provider,
                         ai_key_status,
                         self.config.quantum.provider,
@@ -452,7 +647,7 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
             }
             SlashCommand::Unknown(cmd) => {
                 self.messages.push(Message::error(
-                    format!("Unknown command: /{}. Type /help for available commands.", cmd)
+                    format!("Unknown command or invalid syntax: /{}. Type /help for available commands.", cmd)
                 ));
             }
         }

@@ -57,6 +57,9 @@ async fn run_tui() -> Result<()> {
         // Check for AI responses
         app.check_ai_response();
         
+        // Check for auth responses
+        app.check_auth_response();
+        
         // Draw UI
         terminal.draw(|f| ui::render(f, &mut app))?;
 
