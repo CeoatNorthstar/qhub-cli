@@ -111,13 +111,9 @@ echo ""
 
 # Set up terminal cleanup trap
 cleanup() {
-    echo ""
-    echo -e "${YELLOW}🧹 Cleaning up...${NC}"
-    # Reset terminal
+    # Silent cleanup - no output
     stty sane 2>/dev/null || true
     tput reset 2>/dev/null || true
-    echo -e "${GREEN}✅ Terminal restored${NC}"
-    echo -e "${CYAN}👋 Goodbye from QHub!${NC}"
 }
 
 trap cleanup EXIT INT TERM
@@ -125,5 +121,4 @@ trap cleanup EXIT INT TERM
 # Run the app
 cargo run
 
-# Explicit cleanup
-cleanup
+# No explicit cleanup call - trap handles it automatically

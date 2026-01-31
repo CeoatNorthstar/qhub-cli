@@ -147,6 +147,10 @@ pub struct App {
     pub exit_animation_frame: usize,
     pub config: Config,
     pub auth_service: Option<Arc<AuthService>>,
+    // Autocomplete
+    pub suggestions: Vec<String>,
+    pub selected_suggestion: usize,
+    pub show_suggestions: bool,
 }
 
 impl Default for App {
@@ -248,6 +252,9 @@ impl App {
             exit_animation_frame: 0,
             config,
             auth_service,
+            suggestions: Vec::new(),
+            selected_suggestion: 0,
+            show_suggestions: false,
         };
 
         // Check if first run
@@ -778,5 +785,94 @@ Start generating quantum circuits:
     /// Check if user is authenticated
     pub fn is_authenticated(&self) -> bool {
         self.user_email.is_some()
+    }
+    
+    /// Get available commands based on authentication state
+    pub fn get_available_commands(&self) -> Vec<(&str, &str)> {
+        let mut commands = vec![
+            ("/help", "Show all available commands"),
+            ("/status", "Show account and system status"),
+            ("/clear", "Clear the message history"),
+            ("/quit", "Exit QHub"),
+        ];
+        
+        if self.is_authenticated() {
+            commands.extend_from_slice(&[
+                ("/logout", "Log out of your account"),
+                ("/upgrade", "Upgrade your subscription tier"),
+            ]);
+        } else {
+            commands.extend_from_slice(&[
+                ("/login", "Log in to your account (usage: /login <email> <password>)"),
+                ("/register", "Create a new account (usage: /register <email> <username> <password>)"),
+            ]);
+        }
+        
+        commands
+    }
+    
+    /// Update command suggestions based on current input
+    pub fn update_suggestions(&mut self) {
+        let input = self.input.trim();
+        
+        // Only show suggestions if input starts with /
+        if !input.starts_with('/') || input.len() <= 1 {
+            self.suggestions.clear();
+            self.show_suggestions = false;
+            return;
+        }
+        
+        // Get the command part (before any space)
+        let cmd_part = input[1..].split_whitespace().next().unwrap_or(&input[1..]);
+        
+        // Find matching commands
+        let commands = self.get_available_commands();
+        self.suggestions = commands
+            .iter()
+            .filter(|(cmd, _)| cmd[1..].starts_with(cmd_part))
+            .map(|(cmd, desc)| format!("{} - {}", cmd, desc))
+            .collect();
+        
+        self.show_suggestions = !self.suggestions.is_empty();
+        
+        // Reset selection if suggestions changed
+        if self.selected_suggestion >= self.suggestions.len() {
+            self.selected_suggestion = 0;
+        }
+    }
+    
+    /// Navigate suggestions with arrow keys
+    pub fn select_next_suggestion(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected_suggestion = (self.selected_suggestion + 1) % self.suggestions.len();
+        }
+    }
+    
+    pub fn select_prev_suggestion(&mut self) {
+        if !self.suggestions.is_empty() {
+            if self.selected_suggestion == 0 {
+                self.selected_suggestion = self.suggestions.len() - 1;
+            } else {
+                self.selected_suggestion -= 1;
+            }
+        }
+    }
+    
+    /// Apply the selected suggestion (Tab or Enter on suggestion)
+    pub fn apply_suggestion(&mut self) {
+        if self.show_suggestions && !self.suggestions.is_empty() {
+            let suggestion = &self.suggestions[self.selected_suggestion];
+            // Extract just the command part (before " - ")
+            if let Some(cmd) = suggestion.split(" - ").next() {
+                self.input = cmd.to_string();
+                // Add space for commands that need arguments
+                if matches!(cmd, "/login" | "/register" | "/upgrade") {
+                    self.input.push(' ');
+                }
+            }
+            self.suggestions.clear();
+            self.show_suggestions = false;
+            self.selected_suggestion = 0;
+        }
     }
 }

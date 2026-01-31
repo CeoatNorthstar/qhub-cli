@@ -23,20 +23,34 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
     
+    // Calculate suggestion height dynamically
+    let suggestion_height = if app.show_suggestions {
+        (app.suggestions.len().min(5) + 2) as u16  // Max 5 suggestions + border
+    } else {
+        0
+    };
+    
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Header - minimal
-            Constraint::Min(10),    // Messages
-            Constraint::Length(3),  // Input
-            Constraint::Length(1),  // Status bar
+            Constraint::Length(1),              // Header - minimal
+            Constraint::Min(10),                // Messages
+            Constraint::Length(3),              // Input
+            Constraint::Length(suggestion_height), // Suggestions (dynamic)
+            Constraint::Length(1),              // Status bar
         ])
         .split(frame.area());
 
     render_header(frame, chunks[0]);
     render_messages(frame, app, chunks[1]);
     render_input(frame, app, chunks[2]);
-    render_status_bar(frame, app, chunks[3]);
+    
+    // Render suggestions if showing
+    if app.show_suggestions {
+        render_suggestions(frame, app, chunks[3]);
+    }
+    
+    render_status_bar(frame, app, chunks[4]);
 }
 
 fn render_header(frame: &mut Frame, area: Rect) {
@@ -201,4 +215,47 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let status_widget = Paragraph::new(Line::from(status_parts));
     frame.render_widget(status_widget, area);
+}
+
+fn render_suggestions(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height < 2 {
+        return; // Not enough space
+    }
+    
+    // Create suggestion lines with highlighting for selected item
+    let suggestions: Vec<Line> = app.suggestions
+        .iter()
+        .enumerate()
+        .take(5)  // Max 5 visible suggestions
+        .map(|(i, suggestion)| {
+            let is_selected = i == app.selected_suggestion;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_WHITE)
+            };
+            
+            let prefix = if is_selected { " ▶ " } else { "   " };
+            Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(suggestion, style),
+            ])
+        })
+        .collect();
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(CYAN))
+        .title(Span::styled(
+            " Suggestions (↑↓ to navigate, Tab to select) ",
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        ));
+    
+    let paragraph = Paragraph::new(suggestions)
+        .block(block);
+    
+    frame.render_widget(paragraph, area);
 }
