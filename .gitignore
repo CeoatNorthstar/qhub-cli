@@ -1,9 +1,13 @@
 /target
 
-# Environment files
+# Environment files - NEVER commit real credentials
 .env
 .env.local
+.env.production
+.env.staging
 .env.*.local
+
+# Only .env.example is allowed (template with no real values)
 
 # Database
 *.db
