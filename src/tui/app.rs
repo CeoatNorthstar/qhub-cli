@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use sqlx::PgPool;
 use std::sync::Arc;
+use anyhow::Result;
 
 use crate::api::deepseek::{ChatMessage, DeepSeekClient};
 use crate::config::Config;
@@ -186,9 +187,25 @@ impl App {
             DeepSeekClient::with_default_key()
         };
         
-        // Extract user info from config
+        // Extract user info from config and validate session token
         let (user_email, user_tier) = if let Some(ref user) = config.user {
-            (Some(user.email.clone()), user.tier.clone())
+            // If we have a stored token, validate it against the database
+            if let (Some(token), Some(ref auth_svc)) = (&user.token, &auth_service) {
+                match Self::validate_stored_token(token, auth_svc.clone()) {
+                    Ok(validated_user) => {
+                        // Token is valid, use the validated user info
+                        (Some(validated_user.email), validated_user.tier)
+                    }
+                    Err(_) => {
+                        // Token expired or invalid, clear session
+                        eprintln!("⚠️  Stored session expired. Please log in again.");
+                        (None, "free".to_string())
+                    }
+                }
+            } else {
+                // Have user config but no token or no auth service
+                (Some(user.email.clone()), user.tier.clone())
+            }
         } else {
             (None, "free".to_string())
         };
@@ -216,7 +233,7 @@ impl App {
         // Check if first run
         let is_first_run = !Config::exists();
         
-        // Welcome message
+        // Welcome message based on auth state
         let welcome_msg = if is_first_run {
             format!(
                 r#"
@@ -233,20 +250,35 @@ impl App {
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-Welcome to QHub! 🎉 First time setup detected.
+🎉 Welcome to QHub! First time setup detected.
 
 Configuration saved to: {}
 
-To get started:
-  • Set your AI API key:   export CLOUDFLARE_AI_TOKEN=your_key
-  • Use /help to see all commands
-  • Start chatting to generate quantum circuits!
+🔐 AUTHENTICATION REQUIRED
 
-Example: "create a bell state circuit"
+To use QHub, please create an account or log in:
+
+  /register <email> <username> <password>  - Create new account
+  /login <email> <password>                - Log in to existing account
+
+Why authenticate?
+  • Secure access to quantum computing resources
+  • Track your usage and job history  
+  • Access to premium features and support
+  • Persistent session across devices
+
+After logging in, you can:
+  • Generate quantum circuits with AI
+  • Execute circuits on real quantum hardware
+  • View your computation history
+  • Upgrade to Pro or Enterprise tiers
+
+Type /help for more commands.
 "#,
                 Config::config_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "~/.qhub/config.toml".to_string())
             )
-        } else {
+        } else if app.user_email.is_none() {
+            // Returning user but not logged in
             r#"
 ╔═══════════════════════════════════════════════════════════════════╗
 ║                                                                   ║
@@ -263,16 +295,53 @@ Example: "create a bell state circuit"
 
 Welcome back to QHub!
 
-Commands:
-  /login     - Log in to your account
-  /register  - Create a new account
+🔐 Please log in to continue:
+
+  /login <email> <password>                - Log in to your account
+  /register <email> <username> <password>  - Create new account
+  /help                                    - Show all commands
+
+Your session has expired. Please authenticate to access:
+  • AI-powered quantum circuit generation
+  • Quantum hardware execution
+  • Job history and analytics
+  • Premium features based on your tier
+"#.to_string()
+        } else {
+            // Logged in - show normal welcome
+            format!(
+                r#"
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   ██████╗ ██╗  ██╗██╗   ██╗██████╗                               ║
+║  ██╔═══██╗██║  ██║██║   ██║██╔══██╗                              ║
+║  ██║   ██║███████║██║   ██║██████╔╝                              ║
+║  ██║▄▄ ██║██╔══██║██║   ██║██╔══██╗                              ║
+║  ╚██████╔╝██║  ██║╚██████╔╝██████╔╝                              ║
+║   ╚══▀▀═╝ ╚═╝  ╚═╝ ╚═════╝ ╚═════╝                               ║
+║                                                                   ║
+║   Quantum Computing + AI                                          ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+✅ Logged in as: {}
+📊 Tier: {}
+
+Ready to compute! Commands:
+  /status    - Show account and system status
   /upgrade   - Upgrade your plan
-  /status    - Show configuration status
-  /help      - Show help
+  /logout    - Log out
+  /help      - Show all commands
   /quit      - Exit QHub
 
-Describe what quantum computation you'd like to perform, and I'll generate the code for you.
-"#.to_string()
+Start generating quantum circuits:
+  "Create a Bell state circuit"
+  "Generate a Grover search algorithm"
+  "Build a quantum Fourier transform"
+"#,
+                app.user_email.as_ref().unwrap(),
+                app.user_tier.to_uppercase()
+            )
         };
         
         app.messages.push(Message::system(welcome_msg));
@@ -290,7 +359,14 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
         if let Some(cmd) = SlashCommand::parse(&input) {
             self.handle_slash_command(cmd);
         } else {
-            // Regular message to AI
+            // Regular message to AI - require authentication
+            if self.user_email.is_none() {
+                self.messages.push(Message::error(
+                    "⚠️  Authentication required. Please /login or /register first.".to_string()
+                ));
+                return;
+            }
+            
             self.messages.push(Message::user(input.clone()));
             
             // Add to conversation history
@@ -668,5 +744,19 @@ Describe what quantum computation you'd like to perform, and I'll generate the c
     pub fn scroll_to_bottom(&mut self) {
         // Will be calculated properly in UI rendering
         self.scroll_offset = usize::MAX;
+    }
+    
+    /// Validate a stored token by verifying it with the auth service
+    fn validate_stored_token(token: &str, auth_service: Arc<AuthService>) -> Result<crate::db::User> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                auth_service.verify_session(token).await
+            })
+        })
+    }
+    
+    /// Check if user is authenticated
+    pub fn is_authenticated(&self) -> bool {
+        self.user_email.is_some()
     }
 }
